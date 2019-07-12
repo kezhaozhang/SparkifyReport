@@ -1,0 +1,626 @@
+<html>
+ <head>
+  <script type="text/javascript" async
+  src="https://cdnjs.cloudflare.com/ajax/libs/mathjax/2.7.5/latest.js?config=TeX-MML-AM_CHTML" async>
+</script>
+ </head>
+
+ <body>
+<h1> <p style="text-align:center;">Sparkify Music Service: Churn Prediction using Spark</p></h1>
+<style>
+img {
+  display: block;
+  margin-left: auto;
+  margin-right: auto;
+}
+</style>
+  <img src="music.jpg", alt="music notes", width=50%, class="center">
+<h2> Introduction</h2>
+<p>
+In this project, user transaction data of Sparkify music streaming service are analyzed to predict churn, 
+which is cancellation of service or downgrading service level. Key factors associated with churn have been identified which 
+could help Sparkify to optimize its service to reduce churn rates.
+</p>
+<p>
+Because the dataset is large (12GB for full dataset), Spark is used for data processing and machine learning. 
+Specifically, Spark Python API is used in this project. Spark SQL and Dataframe are used for data loading and manipulation, Spark ML 
+module is used for classification  and hyper parameter tuning.
+</p>
+<p>
+The full dataset is analyzed on Amazon AWS EMR (Elastic MapReduce) service. Before the code was deployed to Amazon EMR, 
+ A medium sized (23 MB) subset of the dataset was used on 
+a local machine for exploratory data analysis, data cleaning, feature engineering, and machine learning model selection. 
+</p>
+
+<h2> Data Exploration and Feature Engineering</h2>
+<p>
+A medium sized subset of the full data is used for data exploration and feature engineering. The data is stored in a json file (medium-sparkify-event-data.json). 
+There are 543,705 rows in the dataset. The schema of the dataframe is
+
+<pre>
+<code>root
+    |-- artist: string (nullable = true)
+    |-- auth: string (nullable = true)
+    |-- firstName: string (nullable = true)
+    |-- gender: string (nullable = true)
+    |-- itemInSession: long (nullable = true)
+    |-- lastName: string (nullable = true)
+    |-- length: double (nullable = true)
+    |-- level: string (nullable = true)
+    |-- location: string (nullable = true)
+    |-- method: string (nullable = true)
+    |-- page: string (nullable = true)
+    |-- registration: long (nullable = true)
+    |-- sessionId: long (nullable = true)
+    |-- song: string (nullable = true)
+    |-- status: long (nullable = true)
+    |-- ts: long (nullable = true)
+    |-- userAgent: string (nullable = true)
+    |-- userId: string (nullable = true)
+   </code>
+   </pre>
+   </p>
+</p>
+<p>
+The users can be identified by columns <code>firstName</code>, <code>lastName</code>, and <code>userId</code>. The missing users can be removed by dropping 
+the missing elements in <code>firstName</code> and <code>lastName</code>:
+<pre>data = data.dropna(subset=['firstName', 'lastName'])</pre> After data cleaning, there are 448 unique users in the medium sized subset of the data.
+</p>
+<p>
+User transactions are logged in the column <code>Page</code>. It contains the following 19 transactions:
+<pre>
+  <code>
+    +-------------------------+
+    |page                     |
+    +-------------------------+
+    |Cancel                   |
+    |Submit Downgrade         |
+    |Thumbs Down              |
+    |Home                     |
+    |Downgrade                |
+    |Roll Advert              |
+    |Logout                   |
+    |Save Settings            |
+    |Cancellation Confirmation|
+    |About                    |
+    |Settings                 |
+    |Add to Playlist          |
+    |Add Friend               |
+    |NextSong                 |
+    |Thumbs Up                |
+    |Help                     |
+    |Upgrade                  |
+    |Error                    |
+    |Submit Upgrade           |
+    +-------------------------+
+  </code>  
+  </pre>
+  </p>
+<p>
+These transactions are used to define churn and as predictors in the machine learning model.
+</p>
+
+<h3>Definition of Churn</h3>
+<p>
+There are two types of churns: 1) Cancellation of membership and 2) Downgrade from paid level to free level.  
+The first type of churn is indicated by "Cancellation Confirmation"  and the second type is by "Submit Downgrade" in <code>Page</code>. 
+We will consider both types and focus more on the first type. In the medium sized dataset, the portion of users
+that have churned is
+ 22.1% (99/448) and 21.7% (97/448) for cancellation and downgrade, respectively. As the crosstab table below shows, about 4.7%
+ of users in the whole population have both downgraded membership level and canceled membership.
+<figure>
+ <pre>
+  <code>
+      +----------------------------+---+---+
+      |churn_Cancel_churn_Downgrade|  0|  1|
+      +----------------------------+---+---+
+      |                           1| 78| 21|
+      |                           0|273| 76|
+      +----------------------------+---+---+
+      
+  </code>
+</pre>
+</figure>
+</p>
+In this project, churn due to cancellation is denoted by <code>churn_Cancel</code> and churn 
+due to downgrade by <code>churn_Downgrade</code>. These two types of churns are treated separately.
+</p>
+<h3>Feature Engineering</h3>
+Both continuous and categorical features are created from the dataset to be used as predictors in the classification model.
+<h4>Continuous Features</h4>
+The continuous features are related to the session properties and users' transactions.
+<p>
+Multiple sessions for each user are logged in the dataset.  Mean and standard deviation of the temporal length of each session(<code>length</code>), 
+number of items in each session (<code>itemInSession</code>) and number of songs (<code>song</code>) a user listened to in each session are calculated.
+</p>
+<p>For features related to user transaction in the column <code>Page</code>, the ratio of the number of transactions 
+  for a type and the total number of interactions for each user is calculated for <code>Thumb Up</code>, <code>Thumb Down</code>, 
+<code>Add Friend</code>, <code>Roll Advert</code>, <code>Add to Playlist</code>, <code>Submit Upgrade</code>, and <code>Error</code>.
+</p>
+<p>In addition, the time difference between the last transaction (<code> max('ts')</code>) and the registration (<code>registration</code>) for each user is calculated. </p>
+<figure>
+  <img src="all_correlation.png" alt="Correlation between continuous features", width=70%>
+  <figcaption, class="center">Fig. 1 Correlation between continuous features. </figcaption>
+</figure>
+<figure>
+  <img src="correlation.png" alt="Correlation between some features", width=60%>
+  <figcaption, class="center">Fig. 2 Strong correlation between session length, number of items per session and number of songs per session. </figcaption>
+</figure>
+<p>
+Pairwise scatter plots in Fig.1 and Fig. 2 show that the correlation among most of the continuous features are weak except for session length, number of items and number of songs per sessions, which 
+are strongly correlated. As a result, number of items per session and number of songs per session are removed from the feature list for the classification model.
+</p>
+
+
+
+<style>
+  * {
+    box-sizing: border-box;
+  }
+  
+  .row {
+    display: flex;
+  }
+  
+  /* Create  equal columns that sits next to each other */
+  .column {
+    flex: 50%;
+    padding: 5px;
+  }
+  </style>
+  
+  <div class="row">
+  
+  <div class="column">
+    <figure>
+    <img src="boxplot_thumb_up.png" alt="Thumb up", width=90%>
+    <figcaption, class="center">Thumb up ratio </figcaption>
+  </figure>
+  </div>
+  <div class="column">
+    <figure>
+    <img src="boxplot_add_playlist.png" alt="Add playlist", width=90%>
+    <figcaption, class="center">Add Playlist ratio </figcaption>
+  </figure>
+  </div>
+  
+  </div>
+  
+  <style>
+    * {
+      box-sizing: border-box;
+    }
+    
+    .row {
+      display: flex;
+    }
+    
+    /* Create  equal columns that sits next to each other */
+    .column {
+      flex: 50%;
+      padding: 5px;
+    }
+    </style>
+    <figure>
+    <div class="row">
+    
+ 
+      <div class="column">
+        <figure>
+          <img src="boxplot_length.png" alt="Session length", width=90%>
+          <figcaption, class="center">Average session length  </figcaption>
+        </figure>
+      </div>
+      <div class="column">
+        <figure>
+          <img src="boxplot_time.png" alt="Time", width=90%>
+          <figcaption, class="center">Time between last transaction and registration  </figcaption>
+        </figure>
+      </div>
+    </div>
+    <figcaption>Fig. 3 Distribution of some continuous features for churned and non-churned users. </figcaption>
+  </figure>
+  <p>
+    In Fig. 3 the distributions of some continuous features are plotted for users that have churned and users that have not. Both churns due to 
+    cancellation (<code>churn_Cancel</code>) and downgrade (<code>churn_Downgrade</code>) are included. The distribution 
+    is different for some features. For example, users that have churned have higher thumb up rates and lower add playlist rates.
+  </p>
+  
+<h4>Categorical Features</h4>
+<p>Three categorical features are included in the data analysis: Gender (<code>gender</code>) of the users,
+whether the transaction status (<code>status</code>) is 404 or not, and the device (<code>userAgent</code>) the users used to 
+access the Sparkify service.  <code>userAgent</code> is parsed to obtain the device or computer used. 
+</p>
+
+
+  <figure>
+  <div class="column">
+  <div class="row">
+    <figure>
+    <img src="bar_gender.png" alt="Churn distribution by gender" style="width:65%" class="center">
+  </figure>
+  </div>
+  
+  
+    <div class="row">
+      <figure>
+        <img src="bar_status.png" alt="Churn distribution by status_404" style="width:65%" class="center">
+      </figure>
+    </div>
+  
+    <div class="row">
+      <figure>
+        <img src="bar_device.png" alt="Churn distribution by device", style="width:65%" class="center">
+      </figure>
+    </div>
+  </div>
+  <figcaption, class="center">Fig. 4 Distributions of categorical features for users that have churned and users that have not.</figcaption>
+</figure>
+
+<p>
+The categorical features shows that there is very little difference in churn rates between diffferent <code>gender</code>.
+There is some but very small difference in churn rate between different <code>status_404</code>. It appears that churn rate for cancellation is high
+when iPad is used. But the significance is still unclear because of the smaller sample size for each device. 
+</p>
+<p>The resultant dataframe is transformed using Spark data pipeline which converts categorical features 
+from string value to numerical value and then encoded with one-hot encoding.</p>
+
+
+<h2>Classification Model</h2>
+<p>
+After data cleaning and feature engineering, the resultant data is split into  
+train and test datasets with 75% and 25% portions, respectively. Three classification models (logistic regression, random forest and gradient boosted trees) 
+are trained with their default settings with the train dataset, and the prediction performance with the test dataset is obtained. We pick the classifier (gradient boosted trees)
+that has the overall best performance in predicting churns due to both cancellation and downgrade for further hypreparamter tuning using cross validation. The performance of the tuned model is evaluated and the feature importance
+is obtained with the fine tuned model so that the most important features affecting churns rates are identified.
+</p>
+<p>
+Finally the random forest model is applied to the full dataset using Amazon EMR service.
+</p>
+
+<h3>Classifier Performance Metric</h3>
+<p>
+Because the dataset is imbalanced--churn rate is about 23%, we use F1 score as the classifier performance metric: 
+</p>
+<p>
+ \( {\rm F1} = 2\times\frac{{\rm Precision}\times{\rm Recall}}{\rm Precision\ +\ Recall}.\)
+  </p>
+
+<p>
+ Unfortunately in Spark ML library, <code>BinaryClassificationEvaluator</code> does not output F1 score, it reports area under the ROC curve or 
+ the precision-recall curve. <code>MulticlassClassificationEvaluator</code> reports F1, precision, recall and accuracy for multiclass classification,
+ but the values are <b><em>incorrect</em></b> for binary classification. Therefore, an evaluator class with F1 score as metric is created:
+ <pre>
+<code>
+    class Fevaluator:
+    """Evalautor classs with F1 score as metric"""
+    def __init__(self, labelCol='label', predictionCol='prediction'):
+        self.label = labelCol
+        self.prediction = predictionCol
+        
+    def evaluate(self, dataset):
+        _, score = performance(dataset, self.label, self.prediction)
+        return score[0]  #f1 score
+    def isLargerBetter(self):
+        return True
+</code>
+ </pre>
+</p>
+<p>
+where function <code>performance</code> calculates F1 score, precision, recall and accuracy of a binary classification prediction. This evaluator can be used for 
+model tuning with cross validation.
+</p>
+<p>
+
+</p>
+<h2>Result with Medium Sized Dataset</h2>
+<p>
+First the results with the medium sized subset are presented. 
+</p>
+<h3>Classification Models: Logistic Regression, Random Forest and Gradient Boosted Trees</h3>
+<p>Logistic regression, random forest and gradient boosted tree classifiers with their default setting are trained with the train dataset.
+ Then they are applied to the test dataset. The performance of the prediction for churn due to cancellation and for churn due to downgrade is
+ summarized in the tables below.
+</p>
+<p>
+<style>
+table, th, td {
+  border: 1px solid black;
+}
+</style>
+<table style="margin-left: auto; margin-right: auto">
+  <caption>Churn Due to Cancellation</caption>
+<tr>
+<th>Model</th>
+<th>F1</th>
+<th>Precision</th>
+<th>Recall</th>
+<th>Accuracy</th>
+</tr>
+<tr>
+<td>Logistic Regression</td>
+<td>0.45</td>
+<td>0.82</td>
+<td>0.31</td>
+<td>0.80</td>
+</tr>
+<tr>
+<td>Random Forest</td>
+<td>0.32</td>
+<td>0.75</td>
+<td>0.21</td>
+<td>0.77</td>
+</tr>
+<tr>
+<td>GBT</td>
+<td>0.53</td>
+<td>0.75</td>
+<td>0.41</td>
+<td>0.81</td>
+</tr>
+</table>
+</p>
+
+<p>
+<table style="margin-left: auto; margin-right: auto">
+    <caption>Churn Due to Downgrade</caption>
+  <tr>
+  <th>Model</th>
+  <th>F1</th>
+  <th>Precision</th>
+  <th>Recall</th>
+  <th>Accuracy</th>
+  </tr>
+  <tr>
+  <td>Logistic Regression</td>
+  <td>0.071</td>
+  <td>0.20</td>
+  <td>0.043</td>
+  <td>0.76</td>
+  </tr>
+  <tr>
+  <td>Random Forest</td>
+  <td>0.22</td>
+  <td>0.75</td>
+  <td>0.13</td>
+  <td>0.81</td>
+  </tr>
+  <tr>
+  <td>GBT</td>
+  <td>0.48</td>
+  <td>0.48</td>
+  <td>0.48</td>
+  <td>0.78</td>
+  </tr>
+  </table>
+</p>
+<p>
+Among the three models, gradient boosted trees (GBT) classifier is much slower than logistic regression and random forest. 
+But GBT has  best F1 score  for both types of churn. Therefore we will further tune the GBT model
+and apply it to the full dataset on Amazon EMR.   Since GBT is tree based model, the numerical features need not be scaled or normalized. </p>
+<h3>Model Tuning</h3>
+<p>
+3-fold Cross validation is used to fine tune the GBT model. <code>MaxIter</code> and <code>subsamplingRate</code> are scanned.
+For churn due to cancellation the default setting happens to be optimal. For churn due to downgrade, 
+<code>subsamplingaRate=0.7</code> improves the GBT performance from the default value of <code>1.0</code>.
+</p>
+
+<p>
+    <table style="margin-left: auto; margin-right: auto">
+        <caption>Churn Due to Cancellation</caption>
+      <tr>
+      <th>Model Setting</th>
+      <th>MaxIter</th>
+      <th>subsampingRate</th>
+      <th>F1 score</th>
+      </tr>
+      <tr>
+      <td>Default</td>
+      <td>20</td>
+      <td>1.0</td>
+      <td>0.53</td>
+      </tr>
+      <tr>
+      <td>Tuned</td>
+      <td>20</td>
+      <td>1.0</td>
+      <td>0.53</td>
+      </table>
+    </p>
+
+    <p>
+        <table style="margin-left: auto; margin-right: auto">
+            <caption>Churn Due to Downgrade</caption>
+          <tr>
+          <th>Model Setting</th>
+          <th>MaxIter</th>
+          <th>subsampingRate</th>
+          <th>F1 score</th>
+          </tr>
+          <tr>
+          <td>Default</td>
+          <td>20</td>
+          <td>1.0</td>
+          <td>0.48</td>
+          </tr>
+          <tr>
+          <td>Tuned</td>
+          <td>20</td>
+          <td>0.7</td>
+          <td>0.51</td>
+          </table>
+    </p>
+<p>
+The model tuning improves the classification performance for churn due to downgrade. But the improvement is
+moderate. There is potential for further improvement if more parameters in the setting are searched.  
+</p>
+<h3>Feature Importance</h3>
+<p>The trained gradient boosted trees model provides the importance score for each feature in the model.
+  Importance of a feature is determined by how much and how effective the feature is used in the decision trees.
+</p>
+<p>Fig. 5 shows feature importance retrieved from the models for churns due to cancellation and downgrade. We will
+look at the importance more closely when we summarize the full dataset results.
+</p>
+
+<p>
+  <figure>
+    <figure>
+        <div class="row">
+        <div class="column">
+          <figure>
+          <img src="feature_importance_cancel.png" alt="Feature importance for churn due to cancellation" style="width:120%">
+        </figure>
+        </div>
+        
+        
+          <div class="column">
+            <figure>
+              <img src="feature_importance_downgrade.png" alt="Feature importance for churn due to downgrade" style="width:120%">
+            </figure>
+          </div>
+        </div>
+    </figure>
+    <figcaption>Fig. 5 Feature importance.</figcaption>
+  </figure>    
+</p>
+
+
+
+<h2>Result of Full Dataset on Amazon EMR</h2>
+<p>The full dataset results are summarized in this section. The computation is done on Amazon EMR with a cluster of 4 cores (1 master, 3 workers).</p>
+<p>
+  The full dataset has 26,259,199 rows. After removal of missing values in <code>firstName</code> and <code>lastName</code>,
+  there are 25,480,720 rows and 22,277 unique users. The churn rate is 22.5% and 22.9% for cancellation and downgrade, respectively. 
+</p>
+<h3>GBT classification Performance</h3>
+<p>
+Gradient boosted trees classifier is used for prediction. The settings obtained using the medium sized dataset are used. No further model tuning is 
+conducted to avoid long computation time. As shown in the table below, the prediction performance is very similar to that with medium sized dataset.
+</p>
+<p>
+    <table style="margin-left: auto; margin-right: auto">
+        <caption>GBT Classification Performance</caption>
+      <tr>
+      <th>Churn Type</th>
+      <th>F1</th>
+      <th>Precision</th>
+      <th>Recall</th>
+      <th>Accuracy</th>
+      </tr>
+      <tr>
+      <td>Cancellation</td>
+      <td>0.53</td>
+      <td>0.72</td>
+      <td>0.42</td>
+      <td>0.83</td>
+      </tr>
+      <tr>
+      <td>Downgrade</td>
+      <td>0.53</td>
+      <td>0.59</td>
+      <td>0.48</td>
+      <td>0.81</td>
+      </tr>
+      </table>
+</p>
+<h3>Feature Importance</h3>
+<p>Feature importance from the GBT model is plotted in Fig. 5. There are common features that are the most important predictors
+  for both churn due to cancellation and churn due to downgrade, such as <code>roll_advert_ratio</code>, <code>thumb_up_ratio</code>
+<code>thumb down_ratio</code>, <code>add_friend_ratio</code>, <code>session_len_avg</code>, and
+<code>session_len_std</code>.</p>
+
+<p>The feature with the highest importance, however. is different for cancellation and downgrade. For churn
+  due to cancellation, it is <code>time</code>, which is the time span from registration to the latest transaction; for 
+  churn due to downgrade, it is <code>roll_advert_ratio</code>, which is likely related to advertisements that users have 
+  encountered.
+</p>
+
+
+<p>
+    <figure>
+      <figure>
+          <div class="row">
+          <div class="column">
+            <figure>
+            <img src="fulldata_feature_importance_cancel.png" alt="Feature importance for churn due to cancellation" style="width:120%">
+          </figure>
+          </div>
+          
+          
+            <div class="column">
+              <figure>
+                <img src="fulldata_feature_importance_downgrade.png" alt="Feature importance for churn due to downgrade" style="width:120%">
+              </figure>
+            </div>
+          </div>
+      </figure>
+      <figcaption>Fig. 5 Feature importance.</figcaption>
+    </figure>    
+  </p>
+
+  <p>In order to see how the features affect churn, the mean values of the continuous features for the churn group and non-churn group
+      are calculated. Then the relative difference in percentage between the churn group and non-churn mean values is calculated:
+    </p>
+    <p>\({\rm Delta (\%)}=\frac{M_{\rm churn}-M_{non-churn}}{M_{\rm non-churn}}\times 100\). </p>
+    <p>Fig. 6 shows Delta (%) for churn due to cancellation and churn due to downgrade.  Blue color means that the feature value
+      is higher for the churn group and red means the opposite.
+    </p>
+<p>By examining the features with the highest importance, we can see that the users who have churned tend to have the following
+  characteristics:
+  <ol>
+ <li> received more advertisements (higher <code>roll_advert_ratio</code>),</li>
+<li>gave more negative reviews (higher <code>thumb_down_ratio</code> and lower <code>thumb_up_ratio</code>), </li>
+<li>stayed longer in session (higher <code>session_len_avg</code>), </li>
+<li>added fewer friends (lower <code>add_friend_ratio</code>),</li>
+<li>more likely to have upgraded membership (higher <code>submit_upgrade_ratio</code>),</li>
+<li>have shorter time of being members for churn due to cancellation (lower <code>time</code>), have longer time of being members
+for churn due to downgrade (higher <code>time</code>).</li>
+</ol>
+</p>
+<p>Many of the above findings are consistent with common sense. However it may be hard to determine the causal relationship for some features. 
+  For example, in the case of churn due to cancellation, the users who churned have short membership length. 
+  This may be the consequence of churn by definition and 
+  does not necessarily mean that users tend to cancel their membership during the early phase of their membership. Additional information or controlled 
+  study may be needed.
+</p>
+  <p>
+      <figure>
+        <figure>
+            <div class="row">
+            <div class="column">
+              <figure>
+              <img src="fulldata_delta_cancel.png" alt="Feature importance for churn due to cancellation" style="width:100%">
+            </figure>
+            </div>
+            
+            
+              <div class="column">
+                <figure>
+                  <img src="fulldata_delta_downgrade.png" alt="Feature importance for churn due to downgrade" style="width:100%">
+                </figure>
+              </div>
+            </div>
+        </figure>
+        <figcaption>Fig. 6 Difference in continuous feature mean value between churn group and non-churn group. Blue means the
+          feature value is higher for the churn group and red means lower.
+        </figcaption>
+      </figure>    
+    </p>
+
+<h2><b>Future Work </b></h2>
+<p>
+Overall performance of churn prediction in this project is not great: F1 score is about 0.53. 
+Below are a few areas that potentially can improve the machine learning performance:
+<ol>
+  <li> <b>Data imbalance:</b> The data is skewed. The churn rate is about 23%. It might be helpful to try oversampling of the
+  churn population or under-sampling of the non-churn population to improve classifier prediction performance.   </li>
+  <li><b>Feature engineering:</b> Some of the user data are not included in the feature. For example, the month, day, and time of the day
+    the users used the services. These features can be added and evaluated for their significance.</li>
+  <li><b>Model tuning:</b> More model parameters and larger ranges of values can be tried to improve model performance. </li>
+  </li>
+</ol>
+</p>
+<p></p>
+
+ </body>
+</html>
